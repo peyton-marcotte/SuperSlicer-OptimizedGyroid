@@ -2790,6 +2790,21 @@ void PrintConfigDef::init_fff_params()
     def->mode = comSimpleAE | comPrusa;
     def->set_default_value( new ConfigOptionEnum<InfillPattern>(ipStars));
 
+    // Z-buckling bias optimization (experimental). Tightens the gyroid wave along the Z
+    // (vertical) axis at low infill density to shorten the effective column length under
+    // Z-axis compression. Filament use at the same `fill_density` setting is preserved.
+    // No effect above ~30% density (formula clamps to no-op).
+    def = this->add("gyroid_optimized", coBool);
+    def->label    = L("Z-buckling bias optimization (experimental)");
+    def->full_label = L("Optimize gyroid for Z-axis compression");
+    def->category = OptionCategory::infill;
+    def->tooltip  = L("Tightens the gyroid wave along the Z (vertical) axis at low infill density "
+                      "to shorten the effective vertical column length and improve Z-axis compression "
+                      "buckling resistance. Filament use is preserved. No effect at ~30% fill density "
+                      "and above. Only applies when Pattern is set to Gyroid.");
+    def->mode = comExpert | comSuSi;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("fill_top_flow_ratio", coPercent);
     def->label = L("Top fill");
     def->full_label = L("Top fill flow ratio");

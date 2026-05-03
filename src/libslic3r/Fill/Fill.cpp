@@ -360,6 +360,9 @@ std::vector<SurfaceFill> group_fills(const Layer &layer)
                 params.pattern          = region_config.fill_pattern.value;
                 params.density          = float(region_config.fill_density) / 100.f;
                 params.dont_adjust      = false;
+                // Pass gyroid_optimized through only when the effective pattern is Gyroid,
+                // so non-Gyroid fills are not differentiated by an irrelevant flag.
+                params.gyroid_optimized = (params.pattern == ipGyroid) && region_config.gyroid_optimized;
                 params.connection       = region_config.infill_connection.value;
                 params.priority         = 0;
 

@@ -661,6 +661,7 @@ static std::vector<std::string> s_Preset_print_options {
         // fill pattern
         "fill_density",
         "fill_pattern",
+        "gyroid_optimized",
         "fill_top_flow_ratio",
         "fill_smooth_width",
         "fill_smooth_distribution",

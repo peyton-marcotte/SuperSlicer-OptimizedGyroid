@@ -4,6 +4,7 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 #include "../ClipperUtils.hpp"
+#include "../MarchingSquares.hpp"
 #include "../ShortestPath.hpp"
 #include "../Surface.hpp"
 #include <cmath>
@@ -12,7 +13,103 @@
 
 #include "FillGyroid.hpp"
 
+// ---------------------------------------------------------------------------
+// Marching-squares scalar field for the Z-buckling-bias optimization.
+// F(x,y,z) = sin(fx*x)cos(fy*y) + sin(fy*y)cos(fz*z) + sin(fz*z)cos(fx*x)
+// fz = omega * baseline tightens the wave along the layer-stacking axis,
+// shortening the effective vertical strand length and improving column-
+// buckling resistance under Z-axis compression.
+// ---------------------------------------------------------------------------
+namespace marchsq {
+using namespace Slic3r;
+
+using coordr_t = long;
+using Pointf   = Vec2d;
+
+struct GyroidField
+{
+    static constexpr float gsizef = 0.40f;
+    static constexpr float rsizef = 0.004f;
+    const coord_t          rsize  = scaled(rsizef);
+    const coordr_t         gsize  = std::round(gsizef / rsizef);
+    Point                  size;
+    Point                  offs;
+    coordf_t               z;
+    float                  fx;
+    float                  fy;
+    float                  fz;
+    float                  isoval = 0.0f;
+
+    explicit GyroidField(const BoundingBox bb, const coordf_t z, const float period, const float omega = 1.0f)
+        : size{bb.size()}, offs{bb.min}, z{z}
+    {
+        const float baseline = float(2.0 * PI) / std::max(period, 1e-3f);
+        fx = baseline;
+        fy = baseline;
+        fz = omega * baseline;
+    }
+
+    float get_scalar(coordf_t x, coordf_t y, coordf_t z_arg) const
+    {
+        const float a = fx * float(x);
+        const float b = fy * float(y);
+        const float c = fz * float(z_arg);
+        return std::sin(a) * std::cos(b) + std::sin(b) * std::cos(c) + std::sin(c) * std::cos(a);
+    }
+
+    float get_scalar(Coord p) const
+    {
+        Pointf pf = to_Pointf(p);
+        return get_scalar(pf.x(), pf.y(), z);
+    }
+
+    inline coord_t  to_coord (const coordr_t& x) const { return x * rsize; }
+    inline coordr_t to_coordr(const coord_t& x)  const { return x / rsize; }
+    inline Point  to_Point (const Coord& p) const { return Point(to_coord(p.c) + offs.x(), to_coord(p.r) + offs.y()); }
+    inline Coord  to_Coord (const Point& p) const { return Coord(to_coordr(p.y() - offs.y()), to_coordr(p.x() - offs.x())); }
+    inline Pointf to_Pointf(const Point& p) const { return Pointf(unscaled(p.x()), unscaled(p.y())); }
+    inline Pointf to_Pointf(const Coord& p) const { return to_Pointf(to_Point(p)); }
+};
+
+template<> struct _RasterTraits<GyroidField>
+{
+    using ValueType = float;
+    static float  get (const GyroidField& sf, size_t row, size_t col) { return sf.get_scalar(Coord(row, col)); }
+    static size_t rows(const GyroidField& sf) { return sf.to_coordr(sf.size.y()); }
+    static size_t cols(const GyroidField& sf) { return sf.to_coordr(sf.size.x()); }
+};
+
+inline Polylines get_gyroid_polylines(const GyroidField& sf, const double tolerance = SCALED_EPSILON)
+{
+    std::vector<Ring> rings = execute_with_policy(ex_tbb, sf, sf.isoval, {sf.gsize, sf.gsize});
+    Polylines polys;
+    polys.reserve(rings.size());
+    for (const Ring& ring : rings) {
+        Polyline poly;
+        Points&  pts = poly.points;
+        pts.reserve(ring.size() + 1);
+        for (const Coord& crd : ring)
+            pts.emplace_back(sf.to_Point(crd));
+        pts.push_back(pts.front());
+        if (tolerance >= 0.0)
+            poly.simplify(tolerance);
+        polys.emplace_back(poly);
+    }
+    return polys;
+}
+
+} // namespace marchsq
+
 namespace Slic3r {
+
+// Z-buckling bias: omega = sqrt(1 / density_adj) clamped [1, 2].
+static inline double compute_omega_factor(double density_adjusted, double line_spacing, double layer_height)
+{
+    double lh_ratio   = (line_spacing > 0.) ? layer_height / line_spacing : 0.5;
+    double correction = 1.0 / std::sqrt(1.0 + lh_ratio);
+    double raw        = std::sqrt(1.0 / std::max(density_adjusted, 0.1)) * correction;
+    return std::clamp(raw, 1.0, 2.0);
+}
 
 static inline double f(double x, double z_sin, double z_cos, bool vertical, bool flip)
 {
@@ -169,16 +266,29 @@ void FillGyroid::_fill_surface_single(
     const double tolerance = params.config->get_computed_value("resolution_internal") / unscaled(line_spacing);
 
     // generate pattern
-    Polylines polylines = make_gyroid_waves(
-        scale_d(this->z),
-        coordf_t(line_spacing),
-        ceil(bb.size()(0) / line_spacing) + 1.,
-        ceil(bb.size()(1) / line_spacing) + 1.,
-        tolerance);
+    Polylines polylines;
+    if (params.gyroid_optimized) {
+        // Marching-squares iso-extraction on the gyroid implicit field with anisotropic Z.
+        const double lh = (params.layer_height > 0.) ? double(params.layer_height) : double(this->get_spacing());
+        const double density_adj = std::max(0.001, double(params.density) * FillGyroid::DENSITY_ADJUST);
+        const double omega       = compute_omega_factor(density_adj, this->get_spacing(), lh);
+        const float  period      = float(2.0 * M_PI) * float(this->get_spacing()) / float(density_adj);
 
-    // shift the polyline to the grid origin
-    for (Polyline &pl : polylines)
-        pl.translate(bb.min);
+        marchsq::GyroidField sf(bb, this->z, period, float(omega));
+        polylines = marchsq::get_gyroid_polylines(sf, SCALED_EPSILON);
+    } else {
+        polylines = make_gyroid_waves(
+            scale_d(this->z),
+            coordf_t(line_spacing),
+            ceil(bb.size()(0) / line_spacing) + 1.,
+            ceil(bb.size()(1) / line_spacing) + 1.,
+            tolerance);
+
+        // shift the parametric output to the grid origin; marching squares already
+        // emits absolute coords via GyroidField::to_Point so it skips this.
+        for (Polyline &pl : polylines)
+            pl.translate(bb.min);
+    }
 
     polylines = intersection_pl(polylines, expolygon);
 

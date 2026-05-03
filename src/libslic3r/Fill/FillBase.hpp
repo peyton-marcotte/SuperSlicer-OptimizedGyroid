@@ -113,6 +113,9 @@ struct FillParams
 
     // sparse infill width to use to create the pattern (0 if not used) (unscaled)
     float    max_sparse_infill_spacing  { 0.f };
+
+    // For Gyroid: when true, use the parameterized "optimized" variant.
+    bool     gyroid_optimized { false };
 };
 static_assert(IsTriviallyCopyable<FillParams>::value, "FillParams class is not POD (and it should be - see constructor).");
 

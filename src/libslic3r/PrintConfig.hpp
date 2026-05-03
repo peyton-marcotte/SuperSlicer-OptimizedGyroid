@@ -910,6 +910,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,               fill_angle_template))
     ((ConfigOptionPercent,              fill_density))
     ((ConfigOptionEnum<InfillPattern>,  fill_pattern))
+    ((ConfigOptionBool,                 gyroid_optimized))
     ((ConfigOptionPercent,              first_layer_flow_ratio))
     ((ConfigOptionEnum<FuzzySkinType>,  fuzzy_skin))
     ((ConfigOptionFloatOrPercent,       fuzzy_skin_thickness))
